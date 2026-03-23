@@ -1,0 +1,65 @@
+# ── Secrets & Environment ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.env
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Node / Next.js ─────────────────────────────────────────────────────────────
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/.cache/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.pnpm-debug.log*
+
+# ── Docker ─────────────────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Database ───────────────────────────────────────────────────────────────────
+*.db
+*.sqlite3
+postgres_data/
+
+# ── OS ─────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# ── IDE ─────────────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ───────────────────────────────────────────────────────────────────────
+logs/
+*.log

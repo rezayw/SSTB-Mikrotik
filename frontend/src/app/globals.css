@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  --cyber-green: #00ff88;
+  --cyber-cyan: #00d4ff;
+  --cyber-dark: #0a0f1e;
+  --cyber-card: #0d1528;
+  --cyber-border: #1a2744;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--cyber-dark);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #060b15;
+}
+::-webkit-scrollbar-thumb {
+  background: #1a2744;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00d4ff44;
+}
+
+/* Cyber glow effects */
+.glow-green {
+  box-shadow: 0 0 10px #00ff8840, 0 0 20px #00ff8820;
+}
+
+.glow-cyan {
+  box-shadow: 0 0 10px #00d4ff40, 0 0 20px #00d4ff20;
+}
+
+.glow-red {
+  box-shadow: 0 0 10px #ff444440, 0 0 20px #ff444420;
+}
+
+/* Animated scan line */
+.scanline {
+  position: relative;
+  overflow: hidden;
+}
+.scanline::after {
+  content: '';
+  position: absolute;
+  top: -100%;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(transparent, #00d4ff40, transparent);
+  animation: scan 3s linear infinite;
+}
+
+@keyframes scan {
+  0% { top: -2px; }
+  100% { top: 100%; }
+}
+
+/* Cyber input */
+.cyber-input {
+  background: #060b15;
+  border: 1px solid #1a2744;
+  color: #00d4ff;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.cyber-input:focus {
+  border-color: #00d4ff;
+  box-shadow: 0 0 0 2px #00d4ff20;
+  outline: none;
+}
+
+/* Cyber button */
+.cyber-btn {
+  background: linear-gradient(135deg, #00d4ff20, #00ff8820);
+  border: 1px solid #00d4ff60;
+  color: #00d4ff;
+  transition: all 0.2s;
+}
+.cyber-btn:hover {
+  background: linear-gradient(135deg, #00d4ff30, #00ff8830);
+  border-color: #00d4ff;
+  box-shadow: 0 0 15px #00d4ff30;
+}
+
+.cyber-btn-danger {
+  background: linear-gradient(135deg, #ff444420, #ff666620);
+  border: 1px solid #ff444460;
+  color: #ff6666;
+}
+.cyber-btn-danger:hover {
+  border-color: #ff4444;
+  box-shadow: 0 0 15px #ff444430;
+}
