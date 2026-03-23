@@ -40,15 +40,75 @@ async def block_ip(
     if data.expires_hours:
         expires_at = datetime.utcnow() + timedelta(hours=data.expires_hours)
 
-    blocked = BlockedIP(
-        address=data.address,
-        reason=data.reason,
-        source=data.source,
-        comment=data.comment,
-        expires_at=expires_at,
-        is_active=True,
-        synced_to_mikrotik=False,
-    )
+    # Try to enrich with geo + threat intel
+    geo: dict = {}
+    threat_score: float = 0.0
+    country = ""
+    country_code = ""
+    city = ""
+    isp = ""
+    asn = ""
+    threat_categories = ""
+    is_tor = False
+    is_proxy = False
+    try:
+        import threat_intel as ti
+        result = await ti.analyze_ip(data.address)
+        geo = result.get("geo", {})
+        threat_score = result.get("threat_score", 0.0) or 0.0
+        country = geo.get("country", "")
+        country_code = geo.get("country_code", "")
+        city = geo.get("city", "")
+        isp = geo.get("isp", "")
+        asn = geo.get("asn", "")
+        threat_categories = ",".join(result.get("threat_categories", []))
+        is_tor = result.get("is_tor", False)
+        is_proxy = result.get("is_proxy", False)
+        # Update cache
+        from routers.threats import _update_cache
+        _update_cache(db, data.address, result)
+    except Exception:
+        pass
+
+    if existing:
+        # Reactivate existing (previously unblocked) entry
+        existing.reason = data.reason
+        existing.source = data.source
+        existing.comment = data.comment
+        existing.expires_at = expires_at
+        existing.threat_score = threat_score
+        existing.country = country
+        existing.country_code = country_code
+        existing.city = city
+        existing.isp = isp
+        existing.asn = asn
+        existing.threat_categories = threat_categories
+        existing.is_tor = is_tor
+        existing.is_proxy = is_proxy
+        existing.is_active = True
+        existing.synced_to_mikrotik = False
+        existing.blocked_at = datetime.utcnow()
+        blocked = existing
+    else:
+        blocked = BlockedIP(
+            address=data.address,
+            reason=data.reason,
+            source=data.source,
+            comment=data.comment,
+            expires_at=expires_at,
+            threat_score=threat_score,
+            country=country,
+            country_code=country_code,
+            city=city,
+            isp=isp,
+            asn=asn,
+            threat_categories=threat_categories,
+            is_tor=is_tor,
+            is_proxy=is_proxy,
+            is_active=True,
+            synced_to_mikrotik=False,
+        )
+        db.add(blocked)
 
     # Also update attack log status
     db.query(AttackLog).filter(
@@ -56,7 +116,6 @@ async def block_ip(
         AttackLog.status == "pending",
     ).update({"status": "blocked"})
 
-    db.add(blocked)
     db.commit()
     db.refresh(blocked)
 

@@ -8,28 +8,40 @@ import logging
 logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8080")
 
 # API Keys
 VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY", "")
 ALIENVAULT_API_KEY = os.getenv("ALIENVAULT_API_KEY", "")
 THREAT_FOX_API_KEY = os.getenv("THREAT_FOX_API_KEY", "")
 NVD_API_KEY = os.getenv("NVD_API_KEY", "")
+ABUSEIPDB_API_KEY = os.getenv("ABUSEIPDB_API_KEY", "")
+
+# CISA KEV catalog URL (no API key needed)
+CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
 app = Celery("sstb_worker", broker=REDIS_URL, backend=REDIS_URL)
 
 app.conf.beat_schedule = {
     "sync-threatfox-daily": {
         "task": "tasks.sync_threatfox_database",
-        "schedule": crontab(hour=2, minute=0),  # 2 AM daily
+        "schedule": crontab(hour=2, minute=0),
     },
     "sync-nvd-cves-daily": {
         "task": "tasks.sync_nvd_cves",
-        "schedule": crontab(hour=3, minute=0),  # 3 AM daily
+        "schedule": crontab(hour=3, minute=0),
     },
     "sync-alienvault-daily": {
         "task": "tasks.sync_alienvault_pulses",
-        "schedule": crontab(hour=4, minute=0),  # 4 AM daily
+        "schedule": crontab(hour=4, minute=0),
+    },
+    "sync-cisa-kev-daily": {
+        "task": "tasks.sync_cisa_kev",
+        "schedule": crontab(hour=5, minute=0),
+    },
+    "warmup-abuseipdb-cache-hourly": {
+        "task": "tasks.warmup_abuseipdb_cache",
+        "schedule": crontab(minute=30),  # Every hour at :30
     },
 }
 app.conf.timezone = "UTC"
@@ -202,3 +214,112 @@ def sync_alienvault_pulses(self):
     """Sync AlienVault OTX pulses for network threats."""
     logger.info("[Worker] Syncing AlienVault pulses...")
     return {"status": "ok"}
+
+
+@app.task(name="tasks.sync_cisa_kev", bind=True)
+def sync_cisa_kev(self):
+    """Fetch CISA Known Exploited Vulnerabilities catalog and store MikroTik-related entries."""
+    logger.info("[Worker] Syncing CISA KEV catalog...")
+    try:
+        result = run_async(_sync_cisa_kev())
+        return result
+    except Exception as e:
+        logger.error(f"[Worker] CISA KEV sync failed: {e}")
+        return {"synced": 0, "error": str(e)}
+
+
+async def _sync_cisa_kev() -> dict:
+    keywords = {"mikrotik", "routeros", "winbox", "router", "firewall", "network"}
+    synced = 0
+    total = 0
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.get(CISA_KEV_URL)
+            if resp.status_code != 200:
+                return {"synced": 0, "error": f"HTTP {resp.status_code}"}
+
+            data = resp.json()
+            vulnerabilities = data.get("vulnerabilities", [])
+            total = len(vulnerabilities)
+
+            for vuln in vulnerabilities:
+                product = vuln.get("product", "").lower()
+                vendor = vuln.get("vendorProject", "").lower()
+                description = vuln.get("shortDescription", "").lower()
+                text = f"{product} {vendor} {description}"
+
+                if any(kw in text for kw in keywords):
+                    try:
+                        await client.post(
+                            f"{BACKEND_URL}/dashboard/cve-alerts/ingest",
+                            json={
+                                "cve_id": vuln.get("cveID", ""),
+                                "description": vuln.get("shortDescription", ""),
+                                "severity": "CRITICAL",  # KEV entries are always critical
+                                "cvss_score": 9.0,
+                                "published_date": vuln.get("dateAdded", ""),
+                                "affected_product": f"{vuln.get('vendorProject', '')} {vuln.get('product', '')}",
+                                "is_kev": True,
+                            },
+                        )
+                        synced += 1
+                    except Exception:
+                        pass
+        except Exception as e:
+            return {"synced": 0, "error": str(e)}
+
+    logger.info(f"[Worker] CISA KEV: {synced} MikroTik-related entries out of {total} total")
+    return {"synced": synced, "total_kev": total}
+
+
+@app.task(name="tasks.warmup_abuseipdb_cache", bind=True)
+def warmup_abuseipdb_cache(self):
+    """Pre-warm AbuseIPDB reputation cache for recently seen IPs."""
+    logger.info("[Worker] Warming up AbuseIPDB cache...")
+    try:
+        result = run_async(_warmup_abuseipdb_cache())
+        return result
+    except Exception as e:
+        logger.error(f"[Worker] AbuseIPDB warmup failed: {e}")
+        return {"warmed": 0, "error": str(e)}
+
+
+async def _warmup_abuseipdb_cache() -> dict:
+    if not ABUSEIPDB_API_KEY:
+        return {"warmed": 0, "skipped": "no API key configured"}
+
+    warmed = 0
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Fetch recent attack logs from backend to get IPs to warm
+        try:
+            resp = await client.get(
+                f"{BACKEND_URL}/threats/logs",
+                params={"limit": 50, "skip": 0},
+            )
+            if resp.status_code != 200:
+                return {"warmed": 0, "error": f"logs fetch HTTP {resp.status_code}"}
+
+            logs = resp.json()
+            seen_ips: set[str] = set()
+
+            for log in logs:
+                ip = log.get("source_ip", "")
+                if ip and ip not in seen_ips:
+                    seen_ips.add(ip)
+                    try:
+                        abuse_resp = await client.get(
+                            "https://api.abuseipdb.com/api/v2/check",
+                            headers={"Key": ABUSEIPDB_API_KEY, "Accept": "application/json"},
+                            params={"ipAddress": ip, "maxAgeInDays": 90, "verbose": True},
+                        )
+                        if abuse_resp.status_code == 200:
+                            warmed += 1
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            return {"warmed": 0, "error": str(e)}
+
+    logger.info(f"[Worker] AbuseIPDB cache warmup: {warmed} IPs checked")
+    return {"warmed": warmed}

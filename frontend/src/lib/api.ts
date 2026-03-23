@@ -2,6 +2,7 @@ import axios from 'axios';
 import Cookies from 'js-cookie';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+const WS_URL = BASE_URL.replace(/^http/, 'ws');
 
 export const api = axios.create({
   baseURL: BASE_URL,
@@ -11,9 +12,7 @@ export const api = axios.create({
 // Attach JWT token to every request
 api.interceptors.request.use((config) => {
   const token = Cookies.get('sstb_token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
+  if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
@@ -29,35 +28,124 @@ api.interceptors.response.use(
   }
 );
 
-// Auth
+// ── Auth ──────────────────────────────────────────────────────────────────────
 export const login = (username: string, password: string) =>
   api.post('/auth/login', { username, password });
-
 export const register = (email: string, username: string, password: string) =>
   api.post('/auth/register', { email, username, password });
-
 export const getMe = () => api.get('/auth/me');
 
-// Dashboard
+// ── Dashboard ─────────────────────────────────────────────────────────────────
 export const getDashboardStats = () => api.get('/dashboard/stats');
 export const getAttackTimeline = (days = 7) => api.get(`/dashboard/attack-timeline?days=${days}`);
 export const getTopAttackers = (limit = 10) => api.get(`/dashboard/top-attackers?limit=${limit}`);
 export const getMikroTikStatus = () => api.get('/dashboard/mikrotik-status');
-export const getCVEAlerts = (limit = 10) => api.get(`/dashboard/cve-alerts?limit=${limit}`);
+export const getCVEAlerts = (limit = 20, kevOnly = false) =>
+  api.get(`/dashboard/cve-alerts?limit=${limit}&kev_only=${kevOnly}`);
+export const getGeoStats = (limit = 20) => api.get(`/dashboard/geo-stats?limit=${limit}`);
+export const getProtocolStats = () => api.get('/dashboard/protocol-stats');
+export const getHourlyHeatmap = (days = 30) => api.get(`/dashboard/hourly-heatmap?days=${days}`);
+export const getThreatScoreDistribution = () => api.get('/dashboard/threat-score-distribution');
+export const getSummaryCounts = () => api.get('/dashboard/summary-counts');
 
-// Blocklist
+// ── Blocklist ─────────────────────────────────────────────────────────────────
 export const getBlocklist = (skip = 0, limit = 100) =>
   api.get(`/blocklist/?skip=${skip}&limit=${limit}`);
-
-export const blockIP = (address: string, reason?: string, comment?: string) =>
-  api.post('/blocklist/', { address, reason, comment, source: 'manual' });
-
+export const blockIP = (address: string, reason?: string, comment?: string, expiresHours?: number) =>
+  api.post('/blocklist/', { address, reason, comment, source: 'manual', expires_hours: expiresHours });
 export const unblockIP = (ip: string) => api.delete(`/blocklist/${ip}`);
-
 export const syncFromMikroTik = () => api.post('/blocklist/sync');
 
-// Threats
-export const getAttackLogs = (skip = 0, limit = 50) =>
-  api.get(`/threats/logs?skip=${skip}&limit=${limit}`);
+// ── Threats / Scan ────────────────────────────────────────────────────────────
+export const getAttackLogs = (skip = 0, limit = 50, filters?: {
+  status?: string; attack_type?: string; country_code?: string; min_score?: number;
+}) => {
+  const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
+  if (filters?.status) params.append('status', filters.status);
+  if (filters?.attack_type) params.append('attack_type', filters.attack_type);
+  if (filters?.country_code) params.append('country_code', filters.country_code);
+  if (filters?.min_score != null) params.append('min_score', String(filters.min_score));
+  return api.get(`/threats/logs?${params}`);
+};
+export const scanIP = (ip: string, useCache = true) =>
+  api.get(`/threats/scan/${ip}?use_cache=${useCache}`);
+export const getCachedScan = (ip: string) => api.get(`/threats/cache/${ip}`);
+export const getThreatSummary = () => api.get('/threats/stats/summary');
 
-export const scanIP = (ip: string) => api.get(`/threats/scan/${ip}`);
+// ── Whitelist ─────────────────────────────────────────────────────────────────
+export const getWhitelist = (skip = 0, limit = 100) =>
+  api.get(`/whitelist/?skip=${skip}&limit=${limit}`);
+export const addToWhitelist = (address: string, reason?: string, comment?: string) =>
+  api.post('/whitelist/', { address, reason, comment });
+export const removeFromWhitelist = (ip: string) => api.delete(`/whitelist/${ip}`);
+export const syncWhitelist = () => api.post('/whitelist/sync');
+
+// ── MikroTik Monitor ──────────────────────────────────────────────────────────
+export const getMikroTikInterfaces = () => api.get('/mikrotik/interfaces');
+export const getMikroTikFirewallRules = (chain?: string) =>
+  api.get(`/mikrotik/firewall/rules${chain ? `?chain=${chain}` : ''}`);
+export const toggleFirewallRule = (ruleId: string, disabled: boolean) =>
+  api.patch(`/mikrotik/firewall/rules/${ruleId}/toggle?disabled=${disabled}`);
+export const getMikroTikNatRules = () => api.get('/mikrotik/firewall/nat');
+export const getMikroTikAddressLists = () => api.get('/mikrotik/firewall/address-lists');
+export const getMikroTikDhcpLeases = () => api.get('/mikrotik/dhcp/leases');
+export const getMikroTikConnections = (limit = 100) =>
+  api.get(`/mikrotik/connections?limit=${limit}`);
+export const getMikroTikLogs = (count = 100, topics?: string) =>
+  api.get(`/mikrotik/logs?count=${count}${topics ? `&topics=${topics}` : ''}`);
+export const getMikroTikRoutes = () => api.get('/mikrotik/routes');
+export const getMikroTikAddresses = () => api.get('/mikrotik/addresses');
+export const getMikroTikIdentity = () => api.get('/mikrotik/identity');
+
+// ── WebSocket Live Feed ────────────────────────────────────────────────────────
+export const createLiveFeed = (onMessage: (data: any) => void, onError?: (e: Event) => void) => {
+  const token = Cookies.get('sstb_token');
+  const ws = new WebSocket(`${WS_URL}/ws/feed${token ? `?token=${token}` : ''}`);
+
+  ws.onmessage = (e) => {
+    try { onMessage(JSON.parse(e.data)); } catch {}
+  };
+  ws.onerror = onError || (() => {});
+
+  // Keep-alive ping every 20s
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.send('ping');
+  }, 20000);
+
+  return {
+    ws,
+    close: () => {
+      clearInterval(pingInterval);
+      ws.close();
+    },
+  };
+};
+
+// ── Settings / MikroTik Device Management ─────────────────────────────────────
+export const listMikroTikDevices = () => api.get('/settings/mikrotik');
+export const addMikroTikDevice = (data: {
+  name: string; host: string; port?: number; use_ssl?: boolean;
+  api_user: string; api_password: string; location?: string;
+  description?: string; is_default?: boolean;
+}) => api.post('/settings/mikrotik', data);
+export const getMikroTikDevice = (id: number) => api.get(`/settings/mikrotik/${id}`);
+export const updateMikroTikDevice = (id: number, data: any) => api.put(`/settings/mikrotik/${id}`, data);
+export const deleteMikroTikDevice = (id: number) => api.delete(`/settings/mikrotik/${id}`);
+export const testMikroTikDevice = (id: number) => api.post(`/settings/mikrotik/${id}/test`);
+export const setDefaultMikroTikDevice = (id: number) => api.post(`/settings/mikrotik/${id}/set-default`);
+export const refreshAllDevices = () => api.post('/settings/mikrotik/refresh-all');
+export const getMikroTikTopology = () => api.get('/settings/mikrotik/topology/view');
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+export const formatBytes = (bytes: number): string => {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+};
+
+export const countryFlagEmoji = (code: string): string => {
+  if (!code || code.length !== 2) return '🌐';
+  const offset = 127397;
+  return String.fromCodePoint(...code.toUpperCase().split('').map((c) => c.charCodeAt(0) + offset));
+};

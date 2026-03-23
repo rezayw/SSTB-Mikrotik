@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     ALIENVAULT_API_KEY: Optional[str] = None
     THREAT_FOX_API_KEY: Optional[str] = None
     URLSCAN_API_KEY: Optional[str] = None
+    ABUSEIPDB_API_KEY: Optional[str] = None
 
     # Threat scoring
     THREAT_SCORE_THRESHOLD: float = 5.0

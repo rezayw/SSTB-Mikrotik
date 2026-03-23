@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-from datetime import datetime, date, timedelta
+from sqlalchemy import func, text
+from datetime import datetime, timedelta
 from database import get_db
-from models import BlockedIP, AttackLog, CVEAlert, User
+from models import BlockedIP, AttackLog, CVEAlert, User, Whitelist
 from schemas import DashboardStats, CVEAlertOut
 from auth import get_current_user
 from typing import List
@@ -26,14 +26,10 @@ async def get_stats(
     ).count()
 
     threats_detected = db.query(AttackLog).count()
-    threats_today = db.query(AttackLog).filter(
-        AttackLog.detected_at >= today
-    ).count()
+    threats_today = db.query(AttackLog).filter(AttackLog.detected_at >= today).count()
 
     active_cve_alerts = db.query(CVEAlert).count()
-    critical_cve_count = db.query(CVEAlert).filter(
-        CVEAlert.severity == "CRITICAL"
-    ).count()
+    critical_cve_count = db.query(CVEAlert).filter(CVEAlert.severity == "CRITICAL").count()
 
     mikrotik_connected = await mikrotik.check_connection()
 
@@ -53,22 +49,22 @@ async def get_stats(
 @router.get("/cve-alerts", response_model=List[CVEAlertOut])
 def get_cve_alerts(
     limit: int = 10,
+    severity: str = None,
+    kev_only: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return (
-        db.query(CVEAlert)
-        .order_by(CVEAlert.cvss_score.desc())
-        .limit(limit)
-        .all()
-    )
+    q = db.query(CVEAlert)
+    if severity:
+        q = q.filter(CVEAlert.severity == severity.upper())
+    if kev_only:
+        q = q.filter(CVEAlert.is_kev == True)
+    return q.order_by(CVEAlert.cvss_score.desc()).limit(limit).all()
 
 
 @router.get("/mikrotik-status")
-async def get_mikrotik_status(
-    current_user: User = Depends(get_current_user),
-):
-    """Get MikroTik router status and info."""
+async def get_mikrotik_status(current_user: User = Depends(get_current_user)):
+    """Get MikroTik router status, system info, and uptime."""
     return await mikrotik.get_router_info()
 
 
@@ -102,7 +98,6 @@ def get_attack_timeline(
             "attacks": count,
             "blocked": blocked,
         })
-
     return result
 
 
@@ -116,16 +111,183 @@ def get_top_attackers(
     results = (
         db.query(
             AttackLog.source_ip,
+            AttackLog.country,
+            AttackLog.country_code,
+            AttackLog.isp,
             func.count(AttackLog.id).label("count"),
             func.max(AttackLog.threat_score).label("max_score"),
         )
-        .group_by(AttackLog.source_ip)
+        .group_by(AttackLog.source_ip, AttackLog.country, AttackLog.country_code, AttackLog.isp)
         .order_by(func.count(AttackLog.id).desc())
         .limit(limit)
         .all()
     )
 
     return [
-        {"ip": r.source_ip, "count": r.count, "max_score": r.max_score}
+        {
+            "ip": r.source_ip,
+            "count": r.count,
+            "max_score": r.max_score,
+            "country": r.country,
+            "country_code": r.country_code,
+            "isp": r.isp,
+        }
         for r in results
     ]
+
+
+@router.get("/geo-stats")
+def get_geo_stats(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get attack counts grouped by country — for geographic analytics."""
+    results = (
+        db.query(
+            AttackLog.country,
+            AttackLog.country_code,
+            func.count(AttackLog.id).label("attack_count"),
+            func.count(
+                func.distinct(AttackLog.source_ip)
+            ).label("unique_ips"),
+            func.avg(AttackLog.threat_score).label("avg_score"),
+        )
+        .filter(AttackLog.country != None, AttackLog.country != "")
+        .group_by(AttackLog.country, AttackLog.country_code)
+        .order_by(func.count(AttackLog.id).desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "country": r.country,
+            "country_code": r.country_code or "XX",
+            "attack_count": r.attack_count,
+            "unique_ips": r.unique_ips,
+            "avg_score": round(r.avg_score or 0, 2),
+        }
+        for r in results
+    ]
+
+
+@router.get("/protocol-stats")
+def get_protocol_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get attack breakdown by attack type and protocol."""
+    attack_types = (
+        db.query(
+            AttackLog.attack_type,
+            func.count(AttackLog.id).label("count"),
+        )
+        .filter(AttackLog.attack_type != None)
+        .group_by(AttackLog.attack_type)
+        .order_by(func.count(AttackLog.id).desc())
+        .limit(10)
+        .all()
+    )
+
+    protocols = (
+        db.query(
+            AttackLog.protocol,
+            func.count(AttackLog.id).label("count"),
+        )
+        .filter(AttackLog.protocol != None)
+        .group_by(AttackLog.protocol)
+        .order_by(func.count(AttackLog.id).desc())
+        .all()
+    )
+
+    target_ports = (
+        db.query(
+            AttackLog.target_port,
+            func.count(AttackLog.id).label("count"),
+        )
+        .filter(AttackLog.target_port != None)
+        .group_by(AttackLog.target_port)
+        .order_by(func.count(AttackLog.id).desc())
+        .limit(10)
+        .all()
+    )
+
+    return {
+        "attack_types": [{"type": r.attack_type, "count": r.count} for r in attack_types],
+        "protocols": [{"protocol": r.protocol, "count": r.count} for r in protocols],
+        "target_ports": [{"port": r.target_port, "count": r.count} for r in target_ports],
+    }
+
+
+@router.get("/hourly-heatmap")
+def get_hourly_heatmap(
+    days: int = 30,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get attack distribution by hour of day (0–23) for the last N days."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    logs = (
+        db.query(AttackLog.detected_at)
+        .filter(AttackLog.detected_at >= since)
+        .all()
+    )
+
+    hour_counts = [0] * 24
+    for log in logs:
+        if log.detected_at:
+            hour_counts[log.detected_at.hour] += 1
+
+    return [{"hour": h, "count": hour_counts[h]} for h in range(24)]
+
+
+@router.get("/threat-score-distribution")
+def get_threat_score_distribution(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get distribution of threat scores across attack logs (bucketed 0-10)."""
+    buckets = {"0-2": 0, "2-4": 0, "4-6": 0, "6-8": 0, "8-10": 0}
+
+    logs = db.query(AttackLog.threat_score).filter(AttackLog.threat_score != None).all()
+    for log in logs:
+        s = log.threat_score
+        if s < 2:
+            buckets["0-2"] += 1
+        elif s < 4:
+            buckets["2-4"] += 1
+        elif s < 6:
+            buckets["4-6"] += 1
+        elif s < 8:
+            buckets["6-8"] += 1
+        else:
+            buckets["8-10"] += 1
+
+    return [{"range": k, "count": v} for k, v in buckets.items()]
+
+
+@router.get("/summary-counts")
+def get_summary_counts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Extended summary: blocked IPs, whitelist, CVE KEV, unique attackers."""
+    total_blocked = db.query(BlockedIP).filter(BlockedIP.is_active == True).count()
+    total_whitelist = db.query(Whitelist).count()
+    total_cve = db.query(CVEAlert).count()
+    kev_count = db.query(CVEAlert).filter(CVEAlert.is_kev == True).count()
+    unique_attackers = db.query(func.distinct(AttackLog.source_ip)).count()
+    tor_count = db.query(BlockedIP).filter(
+        BlockedIP.is_tor == True, BlockedIP.is_active == True
+    ).count()
+
+    return {
+        "total_blocked": total_blocked,
+        "total_whitelist": total_whitelist,
+        "total_cve": total_cve,
+        "kev_count": kev_count,
+        "unique_attackers": unique_attackers,
+        "tor_exits_blocked": tor_count,
+    }
