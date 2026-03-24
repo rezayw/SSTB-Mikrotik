@@ -10,6 +10,10 @@ Sistem keamanan proaktif untuk MikroTik RouterOS yang mengintegrasikan threat in
 
 ---
 
+https://github.com/user-attachments/assets/cdb01b81-8bdb-48b0-8d66-f719e73dafc0
+
+---
+
 ## Arsitektur
 
 ```
