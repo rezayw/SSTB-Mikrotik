@@ -16,10 +16,10 @@ class Settings(BaseSettings):
     # Redis / Celery
     REDIS_URL: str = "redis://redis:6379"
 
-    # MikroTik — MUST be set via environment variable
-    MIKROTIK_API_URL: str
-    MIKROTIK_API_USER: str
-    MIKROTIK_API_PASSWORD: str
+    # MikroTik — opsional, device dikelola lewat Settings tab di dashboard
+    MIKROTIK_API_URL: Optional[str] = None
+    MIKROTIK_API_USER: Optional[str] = None
+    MIKROTIK_API_PASSWORD: Optional[str] = None
 
     # Threat Intelligence APIs — optional, features degrade gracefully if missing
     NVD_API_KEY: Optional[str] = None

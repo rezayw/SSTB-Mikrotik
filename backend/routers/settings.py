@@ -86,9 +86,22 @@ async def add_device(
     db.commit()
     db.refresh(device)
 
-    # Test connection immediately
-    status = await mt.check_device_connection(_device_to_config(device))
+    # Test connection and auto-setup firewall rules
+    cfg = _device_to_config(device)
+    status = await mt.check_device_connection(cfg)
     _apply_status(db, device, status)
+
+    # Update in-memory default if this is the default device
+    if device.is_default:
+        mt.set_default_device(cfg)
+
+    # Best-effort: create SSTB drop rules if device is online
+    if status.get("connected"):
+        try:
+            await mt.setup_sstb_firewall(cfg)
+        except Exception:
+            pass
+
     return device
 
 
@@ -198,6 +211,10 @@ def set_default_device(
     db.query(MikroTikDevice).update({"is_default": False})
     device.is_default = True
     db.commit()
+
+    # Update in-memory default device config
+    mt.set_default_device(_device_to_config(device))
+
     return {"message": f"'{device.name}' set as default device"}
 
 
@@ -268,3 +285,26 @@ def get_topology(
         unknown_count=unknown,
         nodes=nodes,
     )
+
+
+@router.post("/mikrotik/{device_id}/setup-firewall")
+async def setup_firewall_rules(
+    device_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create SSTB drop rules (input/forward) on a specific MikroTik device."""
+    device = db.query(MikroTikDevice).filter(MikroTikDevice.id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    result = await mt.setup_sstb_firewall(_device_to_config(device))
+    return result
+
+
+@router.post("/mikrotik/setup-firewall/default")
+async def setup_firewall_rules_default(
+    current_user: User = Depends(get_current_user),
+):
+    """Create SSTB drop rules on the default MikroTik device (from env config)."""
+    result = await mt.setup_sstb_firewall()
+    return result

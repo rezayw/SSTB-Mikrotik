@@ -652,6 +652,25 @@ const SettingsTab = () => {
     await loadAll();
   };
 
+  const [settingUpFw, setSettingUpFw] = useState<number | null>(null);
+  const [fwResult, setFwResult] = useState<{ id: number; msg: string } | null>(null);
+  const handleSetupFirewall = async (id: number) => {
+    setSettingUpFw(id);
+    setFwResult(null);
+    try {
+      const res = await api.setupFirewallRules(id);
+      const d = res.data;
+      const created = d.created?.length ? `Created: ${d.created.join(', ')}` : '';
+      const exist = d.already_exist?.length ? `Exist: ${d.already_exist.join(', ')}` : '';
+      const failed = d.failed?.length ? `Failed: ${d.failed.join(', ')}` : '';
+      setFwResult({ id, msg: [created, exist, failed].filter(Boolean).join(' | ') || 'Done' });
+    } catch (e: any) {
+      setFwResult({ id, msg: e?.response?.data?.detail || 'Error' });
+    } finally {
+      setSettingUpFw(null);
+    }
+  };
+
   const statusDot = (s: string) =>
     s === 'online' ? 'bg-green-500' : s === 'offline' ? 'bg-red-500' : 'bg-slate-500';
   const statusLabel = (s: string) =>
@@ -752,6 +771,17 @@ const SettingsTab = () => {
                       ✏️ Edit
                     </button>
                     <button
+                      onClick={() => handleSetupFirewall(dev.id)}
+                      disabled={settingUpFw === dev.id}
+                      title="Buat firewall DROP rules untuk SSTB-Blacklist di device ini"
+                      className="px-3 py-1 text-xs bg-orange-500/20 text-orange-300 border border-orange-500/30 rounded-lg hover:bg-orange-500/30 disabled:opacity-50 transition-colors"
+                    >
+                      {settingUpFw === dev.id ? '⟳ Setting…' : '🛡 Setup FW'}
+                    </button>
+                    {fwResult?.id === dev.id && (
+                      <p className="text-[10px] text-slate-400 max-w-[140px] break-words">{fwResult?.msg}</p>
+                    )}
+                    <button
                       onClick={() => handleDelete(dev.id, dev.name)}
                       disabled={dev.is_default}
                       className="px-3 py-1 text-xs bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
@@ -784,6 +814,8 @@ export default function DashboardPage() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('overview');
   const [mtTab, setMtTab] = useState<MikroTikTab>('interfaces');
+  const [mtDevices, setMtDevices] = useState<any[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<number | undefined>(undefined);
 
   // Data
   const [stats, setStats] = useState<any>(null);
@@ -862,15 +894,16 @@ export default function DashboardPage() {
     setLoading(false);
   }, []);
 
-  const fetchMikroTikData = useCallback(async () => {
+  const fetchMikroTikData = useCallback(async (devId?: number) => {
+    const did = devId !== undefined ? devId : selectedDeviceId;
     setMtLoading(true);
     const results = await Promise.allSettled([
-      api.getMikroTikInterfaces(),
-      api.getMikroTikFirewallRules(mtChain || undefined),
-      api.getMikroTikDhcpLeases(),
-      api.getMikroTikLogs(150),
-      api.getMikroTikConnections(100),
-      api.getMikroTikNatRules(),
+      api.getMikroTikInterfaces(did),
+      api.getMikroTikFirewallRules(mtChain || undefined, did),
+      api.getMikroTikDhcpLeases(did),
+      api.getMikroTikLogs(150, undefined, did),
+      api.getMikroTikConnections(100, did),
+      api.getMikroTikNatRules(did),
     ]);
     if (results[0].status === 'fulfilled') setMtInterfaces(results[0].value.data);
     if (results[1].status === 'fulfilled') setMtFirewallRules(results[1].value.data);
@@ -879,7 +912,14 @@ export default function DashboardPage() {
     if (results[4].status === 'fulfilled') setMtConnections(results[4].value.data);
     if (results[5].status === 'fulfilled') setMtNatRules(results[5].value.data);
     setMtLoading(false);
-  }, [mtChain]);
+  }, [mtChain, selectedDeviceId]);
+
+  const loadMtDevices = useCallback(async () => {
+    try {
+      const res = await api.listMikroTikDevices();
+      setMtDevices(res.data);
+    } catch {}
+  }, []);
 
   useEffect(() => {
     const token = Cookies.get('sstb_token');
@@ -901,8 +941,8 @@ export default function DashboardPage() {
   }, [fetchCoreData, router]);
 
   useEffect(() => {
-    if (tab === 'mikrotik') fetchMikroTikData();
-  }, [tab, fetchMikroTikData]);
+    if (tab === 'mikrotik') { loadMtDevices(); fetchMikroTikData(); }
+  }, [tab, fetchMikroTikData, loadMtDevices]);
 
   useEffect(() => {
     if (tab === 'mikrotik') fetchMikroTikData();
@@ -1341,6 +1381,31 @@ export default function DashboardPage() {
           {/* MIKROTIK MONITOR */}
           {!loading && tab === 'mikrotik' && (
             <div className="space-y-4">
+              {/* Device Selector */}
+              {mtDevices.length > 0 && (
+                <div className="flex items-center gap-3 bg-slate-900/60 border border-slate-700 rounded-xl px-4 py-2.5">
+                  <span className="text-slate-400 text-xs whitespace-nowrap">📡 Device:</span>
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={() => { setSelectedDeviceId(undefined); fetchMikroTikData(undefined); }}
+                      className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${selectedDeviceId === undefined ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                    >
+                      ★ Default
+                    </button>
+                    {mtDevices.map((dev: any) => (
+                      <button
+                        key={dev.id}
+                        onClick={() => { setSelectedDeviceId(dev.id); fetchMikroTikData(dev.id); }}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${selectedDeviceId === dev.id ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${dev.last_status === 'online' ? 'bg-green-400' : dev.last_status === 'offline' ? 'bg-red-400' : 'bg-slate-500'}`} />
+                        {dev.router_identity || dev.name}
+                        <span className="text-slate-500 font-mono text-[10px]">{dev.host}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {mikrotikStatus?.data && (
                 <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                   {[
@@ -1372,7 +1437,7 @@ export default function DashboardPage() {
                     {t.label}
                   </button>
                 ))}
-                <button onClick={fetchMikroTikData} disabled={mtLoading} className="ml-auto px-3 py-1.5 rounded-lg text-xs bg-slate-800 text-slate-400 hover:bg-slate-700 transition-colors disabled:opacity-50">
+                <button onClick={() => fetchMikroTikData()} disabled={mtLoading} className="ml-auto px-3 py-1.5 rounded-lg text-xs bg-slate-800 text-slate-400 hover:bg-slate-700 transition-colors disabled:opacity-50">
                   {mtLoading ? '⟳' : '🔄'} Refresh
                 </button>
               </div>

@@ -15,9 +15,7 @@ VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY", "")
 ALIENVAULT_API_KEY = os.getenv("ALIENVAULT_API_KEY", "")
 THREAT_FOX_API_KEY = os.getenv("THREAT_FOX_API_KEY", "")
 NVD_API_KEY = os.getenv("NVD_API_KEY", "")
-ABUSEIPDB_API_KEY = os.getenv("ABUSEIPDB_API_KEY", "")
 
-# CISA KEV catalog URL (no API key needed)
 CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
 app = Celery("sstb_worker", broker=REDIS_URL, backend=REDIS_URL)
@@ -39,9 +37,9 @@ app.conf.beat_schedule = {
         "task": "tasks.sync_cisa_kev",
         "schedule": crontab(hour=5, minute=0),
     },
-    "warmup-abuseipdb-cache-hourly": {
-        "task": "tasks.warmup_abuseipdb_cache",
-        "schedule": crontab(minute=30),  # Every hour at :30
+    "cleanup-expired-blocks-hourly": {
+        "task": "tasks.cleanup_expired_blocks",
+        "schedule": crontab(minute=0),  # every hour on the hour
     },
 }
 app.conf.timezone = "UTC"
@@ -56,6 +54,8 @@ def run_async(coro):
     finally:
         loop.close()
 
+
+# ── Deep IP Analysis ──────────────────────────────────────────────────────────
 
 @app.task(name="tasks.analyze_ip_deep", bind=True, max_retries=3)
 def analyze_ip_deep(self, ip: str):
@@ -75,7 +75,6 @@ async def _analyze_ip_deep(ip: str) -> dict:
     tf_score = 0.0
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        # VirusTotal
         if VIRUSTOTAL_API_KEY:
             try:
                 resp = await client.get(
@@ -91,7 +90,6 @@ async def _analyze_ip_deep(ip: str) -> dict:
             except Exception as e:
                 logger.error(f"VT error: {e}")
 
-        # AlienVault OTX
         if ALIENVAULT_API_KEY:
             try:
                 resp = await client.get(
@@ -105,7 +103,6 @@ async def _analyze_ip_deep(ip: str) -> dict:
             except Exception as e:
                 logger.error(f"AlienVault error: {e}")
 
-        # ThreatFox
         if THREAT_FOX_API_KEY:
             try:
                 resp = await client.post(
@@ -121,22 +118,22 @@ async def _analyze_ip_deep(ip: str) -> dict:
             except Exception as e:
                 logger.error(f"ThreatFox error: {e}")
 
-    total_score = (vt_score * 0.5) + (av_score * 0.3) + (tf_score * 0.2)
-    is_malicious = total_score >= 5.0
-
+    total_score = (vt_score * 0.40) + (av_score * 0.45) + (tf_score * 0.15)
     return {
         "ip": ip,
         "threat_score": round(total_score, 2),
-        "is_malicious": is_malicious,
+        "is_malicious": total_score >= 5.0,
         "virustotal_score": vt_score,
         "alienvault_score": av_score,
         "threatfox_score": tf_score,
     }
 
 
+# ── ThreatFox Sync ────────────────────────────────────────────────────────────
+
 @app.task(name="tasks.sync_threatfox_database", bind=True)
 def sync_threatfox_database(self):
-    """Sync recent ThreatFox IoCs to local database."""
+    """Sync recent ThreatFox IoCs to local database via backend ingest."""
     logger.info("[Worker] Syncing ThreatFox database...")
     try:
         result = run_async(_sync_threatfox())
@@ -159,12 +156,10 @@ async def _sync_threatfox() -> int:
         if resp.status_code == 200:
             data = resp.json()
             if data.get("query_status") == "ok":
-                iocs = data.get("data", [])
-                for ioc in iocs:
+                for ioc in data.get("data", []):
                     if ioc.get("ioc_type") == "ip:port":
                         ip = ioc.get("ioc", "").split(":")[0]
                         if ip:
-                            # Notify backend to pre-cache this threat
                             try:
                                 await client.post(
                                     f"{BACKEND_URL}/threats/ingest",
@@ -173,6 +168,7 @@ async def _sync_threatfox() -> int:
                                         "attack_type": "threatfox_sync",
                                         "raw_log": f"ThreatFox IoC: {ioc.get('tags', [])}",
                                     },
+                                    timeout=5.0,
                                 )
                                 synced += 1
                             except Exception:
@@ -180,45 +176,157 @@ async def _sync_threatfox() -> int:
     return synced
 
 
+# ── NVD CVE Sync ──────────────────────────────────────────────────────────────
+
 @app.task(name="tasks.sync_nvd_cves", bind=True)
 def sync_nvd_cves(self):
-    """Fetch and store MikroTik-related CVEs from NVD."""
+    """Fetch and store MikroTik-related CVEs from NVD into the backend."""
     logger.info("[Worker] Syncing NVD CVEs...")
     try:
         result = run_async(_sync_nvd_cves())
-        return {"cves_synced": result}
+        return result
     except Exception as e:
         logger.error(f"[Worker] NVD sync failed: {e}")
+        return {"synced": 0, "error": str(e)}
 
 
-async def _sync_nvd_cves() -> int:
+async def _sync_nvd_cves() -> dict:
     if not NVD_API_KEY:
-        return 0
+        logger.warning("[Worker] NVD_API_KEY not set, skipping CVE sync")
+        return {"synced": 0, "skipped": "no NVD_API_KEY"}
 
     synced = 0
+    failed = 0
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(
-            "https://services.nvd.nist.gov/rest/json/cves/2.0",
-            params={"keywordSearch": "MikroTik RouterOS", "resultsPerPage": 50},
-            headers={"apiKey": NVD_API_KEY},
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            # In a full implementation, parse and store each CVE
-            synced = len(data.get("vulnerabilities", []))
-    return synced
+        try:
+            resp = await client.get(
+                "https://services.nvd.nist.gov/rest/json/cves/2.0",
+                params={"keywordSearch": "MikroTik RouterOS", "resultsPerPage": 50},
+                headers={"apiKey": NVD_API_KEY},
+            )
+            if resp.status_code != 200:
+                return {"synced": 0, "error": f"NVD HTTP {resp.status_code}"}
 
+            data = resp.json()
+            for vuln in data.get("vulnerabilities", []):
+                cve = vuln.get("cve", {})
+                cve_id = cve.get("id", "")
+                if not cve_id:
+                    continue
+
+                # CVSS score — try v3.1 then v3.0 then v2
+                metrics = cve.get("metrics", {})
+                cvss_score = 0.0
+                severity = "MEDIUM"
+                for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                    entries = metrics.get(key, [])
+                    if entries:
+                        cvss_data = entries[0].get("cvssData", {})
+                        cvss_score = float(cvss_data.get("baseScore", 0.0))
+                        severity = cvss_data.get("baseSeverity", entries[0].get("baseSeverity", "MEDIUM")).upper()
+                        break
+
+                description = ""
+                for desc in cve.get("descriptions", []):
+                    if desc.get("lang") == "en":
+                        description = desc.get("value", "")
+                        break
+
+                published = cve.get("published", "")
+                affected = "MikroTik RouterOS"
+
+                try:
+                    await client.post(
+                        f"{BACKEND_URL}/dashboard/cve-alerts/ingest",
+                        json={
+                            "cve_id": cve_id,
+                            "description": description,
+                            "severity": severity,
+                            "cvss_score": cvss_score,
+                            "published_date": published,
+                            "affected_product": affected,
+                            "is_kev": False,
+                        },
+                        timeout=5.0,
+                    )
+                    synced += 1
+                except Exception as e:
+                    logger.error(f"[Worker] Failed to ingest {cve_id}: {e}")
+                    failed += 1
+
+        except Exception as e:
+            return {"synced": 0, "error": str(e)}
+
+    logger.info(f"[Worker] NVD CVE sync: {synced} stored, {failed} failed")
+    return {"synced": synced, "failed": failed}
+
+
+# ── AlienVault Pulse Sync ─────────────────────────────────────────────────────
 
 @app.task(name="tasks.sync_alienvault_pulses", bind=True)
 def sync_alienvault_pulses(self):
-    """Sync AlienVault OTX pulses for network threats."""
+    """Sync AlienVault OTX pulses — feed IPs from network-related pulses into ingest."""
     logger.info("[Worker] Syncing AlienVault pulses...")
-    return {"status": "ok"}
+    try:
+        result = run_async(_sync_alienvault_pulses())
+        return result
+    except Exception as e:
+        logger.error(f"[Worker] AlienVault sync failed: {e}")
+        return {"synced": 0, "error": str(e)}
 
+
+async def _sync_alienvault_pulses() -> dict:
+    if not ALIENVAULT_API_KEY:
+        logger.warning("[Worker] ALIENVAULT_API_KEY not set, skipping pulse sync")
+        return {"synced": 0, "skipped": "no ALIENVAULT_API_KEY"}
+
+    synced = 0
+    failed = 0
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            # Fetch recent subscribed pulses (last 7 days)
+            resp = await client.get(
+                "https://otx.alienvault.com/api/v1/pulses/subscribed",
+                headers={"X-OTX-API-KEY": ALIENVAULT_API_KEY},
+                params={"modified_since": "", "limit": 20},
+            )
+            if resp.status_code != 200:
+                return {"synced": 0, "error": f"OTX HTTP {resp.status_code}"}
+
+            pulses = resp.json().get("results", [])
+            seen_ips: set = set()
+
+            for pulse in pulses:
+                for indicator in pulse.get("indicators", []):
+                    if indicator.get("type") == "IPv4":
+                        ip = indicator.get("indicator", "")
+                        if ip and ip not in seen_ips:
+                            seen_ips.add(ip)
+                            try:
+                                await client.post(
+                                    f"{BACKEND_URL}/threats/ingest",
+                                    json={
+                                        "source_ip": ip,
+                                        "attack_type": "alienvault_pulse",
+                                        "raw_log": f"OTX Pulse: {pulse.get('name', '')}",
+                                    },
+                                    timeout=5.0,
+                                )
+                                synced += 1
+                            except Exception:
+                                failed += 1
+        except Exception as e:
+            return {"synced": 0, "error": str(e)}
+
+    logger.info(f"[Worker] AlienVault pulse sync: {synced} IPs ingested, {failed} failed")
+    return {"synced": synced, "failed": failed}
+
+
+# ── CISA KEV Sync ─────────────────────────────────────────────────────────────
 
 @app.task(name="tasks.sync_cisa_kev", bind=True)
 def sync_cisa_kev(self):
-    """Fetch CISA Known Exploited Vulnerabilities catalog and store MikroTik-related entries."""
+    """Fetch CISA Known Exploited Vulnerabilities and store MikroTik-related entries."""
     logger.info("[Worker] Syncing CISA KEV catalog...")
     try:
         result = run_async(_sync_cisa_kev())
@@ -256,12 +364,13 @@ async def _sync_cisa_kev() -> dict:
                             json={
                                 "cve_id": vuln.get("cveID", ""),
                                 "description": vuln.get("shortDescription", ""),
-                                "severity": "CRITICAL",  # KEV entries are always critical
+                                "severity": "CRITICAL",
                                 "cvss_score": 9.0,
                                 "published_date": vuln.get("dateAdded", ""),
                                 "affected_product": f"{vuln.get('vendorProject', '')} {vuln.get('product', '')}",
                                 "is_kev": True,
                             },
+                            timeout=5.0,
                         )
                         synced += 1
                     except Exception:
@@ -273,53 +382,46 @@ async def _sync_cisa_kev() -> dict:
     return {"synced": synced, "total_kev": total}
 
 
-@app.task(name="tasks.warmup_abuseipdb_cache", bind=True)
-def warmup_abuseipdb_cache(self):
-    """Pre-warm AbuseIPDB reputation cache for recently seen IPs."""
-    logger.info("[Worker] Warming up AbuseIPDB cache...")
+# ── Cleanup Expired Blocks ────────────────────────────────────────────────────
+
+@app.task(name="tasks.cleanup_expired_blocks", bind=True)
+def cleanup_expired_blocks(self):
+    """Deactivate expired blocked IPs by calling backend cleanup endpoint."""
+    logger.info("[Worker] Cleaning up expired blocked IPs...")
     try:
-        result = run_async(_warmup_abuseipdb_cache())
+        result = run_async(_cleanup_expired())
         return result
     except Exception as e:
-        logger.error(f"[Worker] AbuseIPDB warmup failed: {e}")
-        return {"warmed": 0, "error": str(e)}
+        logger.error(f"[Worker] Cleanup failed: {e}")
+        return {"cleaned": 0, "error": str(e)}
 
 
-async def _warmup_abuseipdb_cache() -> dict:
-    if not ABUSEIPDB_API_KEY:
-        return {"warmed": 0, "skipped": "no API key configured"}
-
-    warmed = 0
+async def _cleanup_expired() -> dict:
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Fetch recent attack logs from backend to get IPs to warm
         try:
-            resp = await client.get(
-                f"{BACKEND_URL}/threats/logs",
-                params={"limit": 50, "skip": 0},
+            # Need auth — use internal service token if set, else skip
+            secret = os.getenv("WORKER_SECRET", os.getenv("SECRET_KEY", ""))
+            if not secret:
+                return {"cleaned": 0, "skipped": "no WORKER_SECRET or SECRET_KEY"}
+
+            # Get token
+            login_resp = await client.post(
+                f"{BACKEND_URL}/auth/login",
+                json={"username": os.getenv("WORKER_USER", "admin"),
+                      "password": os.getenv("WORKER_PASSWORD", "")},
+                timeout=10.0,
             )
-            if resp.status_code != 200:
-                return {"warmed": 0, "error": f"logs fetch HTTP {resp.status_code}"}
+            if login_resp.status_code != 200:
+                return {"cleaned": 0, "error": "login failed"}
 
-            logs = resp.json()
-            seen_ips: set[str] = set()
-
-            for log in logs:
-                ip = log.get("source_ip", "")
-                if ip and ip not in seen_ips:
-                    seen_ips.add(ip)
-                    try:
-                        abuse_resp = await client.get(
-                            "https://api.abuseipdb.com/api/v2/check",
-                            headers={"Key": ABUSEIPDB_API_KEY, "Accept": "application/json"},
-                            params={"ipAddress": ip, "maxAgeInDays": 90, "verbose": True},
-                        )
-                        if abuse_resp.status_code == 200:
-                            warmed += 1
-                    except Exception:
-                        pass
-
+            token = login_resp.json().get("access_token", "")
+            resp = await client.post(
+                f"{BACKEND_URL}/dashboard/cleanup-expired",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            return {"cleaned": 0, "error": f"HTTP {resp.status_code}"}
         except Exception as e:
-            return {"warmed": 0, "error": str(e)}
-
-    logger.info(f"[Worker] AbuseIPDB cache warmup: {warmed} IPs checked")
-    return {"warmed": warmed}
+            return {"cleaned": 0, "error": str(e)}

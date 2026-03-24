@@ -81,20 +81,29 @@ export const removeFromWhitelist = (ip: string) => api.delete(`/whitelist/${ip}`
 export const syncWhitelist = () => api.post('/whitelist/sync');
 
 // ── MikroTik Monitor ──────────────────────────────────────────────────────────
-export const getMikroTikInterfaces = () => api.get('/mikrotik/interfaces');
-export const getMikroTikFirewallRules = (chain?: string) =>
-  api.get(`/mikrotik/firewall/rules${chain ? `?chain=${chain}` : ''}`);
+const _dq = (deviceId?: number) => (deviceId != null ? `device_id=${deviceId}` : '');
+const _qs = (...parts: string[]) => { const q = parts.filter(Boolean).join('&'); return q ? `?${q}` : ''; };
+
+export const getMikroTikInterfaces = (deviceId?: number) =>
+  api.get(`/mikrotik/interfaces${_qs(_dq(deviceId))}`);
+export const getMikroTikFirewallRules = (chain?: string, deviceId?: number) =>
+  api.get(`/mikrotik/firewall/rules${_qs(chain ? `chain=${chain}` : '', _dq(deviceId))}`);
 export const toggleFirewallRule = (ruleId: string, disabled: boolean) =>
   api.patch(`/mikrotik/firewall/rules/${ruleId}/toggle?disabled=${disabled}`);
-export const getMikroTikNatRules = () => api.get('/mikrotik/firewall/nat');
-export const getMikroTikAddressLists = () => api.get('/mikrotik/firewall/address-lists');
-export const getMikroTikDhcpLeases = () => api.get('/mikrotik/dhcp/leases');
-export const getMikroTikConnections = (limit = 100) =>
-  api.get(`/mikrotik/connections?limit=${limit}`);
-export const getMikroTikLogs = (count = 100, topics?: string) =>
-  api.get(`/mikrotik/logs?count=${count}${topics ? `&topics=${topics}` : ''}`);
-export const getMikroTikRoutes = () => api.get('/mikrotik/routes');
-export const getMikroTikAddresses = () => api.get('/mikrotik/addresses');
+export const getMikroTikNatRules = (deviceId?: number) =>
+  api.get(`/mikrotik/firewall/nat${_qs(_dq(deviceId))}`);
+export const getMikroTikAddressLists = (deviceId?: number) =>
+  api.get(`/mikrotik/firewall/address-lists${_qs(_dq(deviceId))}`);
+export const getMikroTikDhcpLeases = (deviceId?: number) =>
+  api.get(`/mikrotik/dhcp/leases${_qs(_dq(deviceId))}`);
+export const getMikroTikConnections = (limit = 100, deviceId?: number) =>
+  api.get(`/mikrotik/connections${_qs(`limit=${limit}`, _dq(deviceId))}`);
+export const getMikroTikLogs = (count = 100, topics?: string, deviceId?: number) =>
+  api.get(`/mikrotik/logs${_qs(`count=${count}`, topics ? `topics=${topics}` : '', _dq(deviceId))}`);
+export const getMikroTikRoutes = (deviceId?: number) =>
+  api.get(`/mikrotik/routes${_qs(_dq(deviceId))}`);
+export const getMikroTikAddresses = (deviceId?: number) =>
+  api.get(`/mikrotik/addresses${_qs(_dq(deviceId))}`);
 export const getMikroTikIdentity = () => api.get('/mikrotik/identity');
 
 // ── WebSocket Live Feed ────────────────────────────────────────────────────────
@@ -135,6 +144,8 @@ export const testMikroTikDevice = (id: number) => api.post(`/settings/mikrotik/$
 export const setDefaultMikroTikDevice = (id: number) => api.post(`/settings/mikrotik/${id}/set-default`);
 export const refreshAllDevices = () => api.post('/settings/mikrotik/refresh-all');
 export const getMikroTikTopology = () => api.get('/settings/mikrotik/topology/view');
+export const setupFirewallRules = (id: number) => api.post(`/settings/mikrotik/${id}/setup-firewall`);
+export const setupFirewallRulesDefault = () => api.post('/settings/mikrotik/setup-firewall/default');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 export const formatBytes = (bytes: number): string => {

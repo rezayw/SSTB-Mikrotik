@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List, Any
 from datetime import datetime
+import ipaddress
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -42,6 +43,22 @@ class BlockedIPCreate(BaseModel):
     comment: Optional[str] = None
     source: str = "manual"
     expires_hours: Optional[int] = 168  # 7 days default
+
+    @field_validator("address")
+    @classmethod
+    def validate_ip(cls, v: str) -> str:
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError(f"'{v}' is not a valid IP address")
+        return v
+
+    @field_validator("expires_hours")
+    @classmethod
+    def validate_expires(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
+            raise ValueError("expires_hours must be positive")
+        return v
 
 
 class BlockedIPOut(BaseModel):
@@ -226,6 +243,15 @@ class WhitelistCreate(BaseModel):
     address: str
     reason: Optional[str] = None
     comment: Optional[str] = None
+
+    @field_validator("address")
+    @classmethod
+    def validate_ip(cls, v: str) -> str:
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError(f"'{v}' is not a valid IP address")
+        return v
 
 
 class WhitelistOut(BaseModel):

@@ -291,3 +291,87 @@ def get_summary_counts(
         "unique_attackers": unique_attackers,
         "tor_exits_blocked": tor_count,
     }
+
+
+# ── CVE Ingest (called by worker) ─────────────────────────────────────────────
+
+from pydantic import BaseModel
+from typing import Optional as Opt
+
+class CVEIngest(BaseModel):
+    cve_id: str
+    description: Opt[str] = None
+    severity: Opt[str] = "CRITICAL"
+    cvss_score: float = 0.0
+    published_date: Opt[str] = None
+    affected_product: Opt[str] = None
+    is_kev: bool = False
+    epss_score: float = 0.0
+
+
+@router.post("/cve-alerts/ingest")
+def ingest_cve(entry: CVEIngest, db: Session = Depends(get_db)):
+    """Upsert a CVE alert from worker (no auth — internal use only)."""
+    if not entry.cve_id:
+        return {"status": "skipped", "reason": "empty cve_id"}
+
+    pub = None
+    if entry.published_date:
+        try:
+            from datetime import datetime as dt
+            pub = dt.fromisoformat(entry.published_date.replace("Z", "+00:00").replace("+00:00", ""))
+        except Exception:
+            pass
+
+    existing = db.query(CVEAlert).filter(CVEAlert.cve_id == entry.cve_id).first()
+    if existing:
+        existing.description = entry.description or existing.description
+        existing.severity = (entry.severity or "CRITICAL").upper()
+        existing.cvss_score = entry.cvss_score
+        existing.is_kev = entry.is_kev
+        existing.affected_product = entry.affected_product or existing.affected_product
+        existing.epss_score = entry.epss_score
+        existing.last_modified = datetime.utcnow()
+        if pub:
+            existing.published_date = pub
+    else:
+        db.add(CVEAlert(
+            cve_id=entry.cve_id,
+            description=entry.description,
+            severity=(entry.severity or "CRITICAL").upper(),
+            cvss_score=entry.cvss_score,
+            is_kev=entry.is_kev,
+            affected_product=entry.affected_product,
+            epss_score=entry.epss_score,
+            published_date=pub,
+            last_modified=datetime.utcnow(),
+        ))
+    db.commit()
+    return {"status": "ok", "cve_id": entry.cve_id}
+
+
+@router.post("/cleanup-expired")
+async def cleanup_expired_blocks(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Deactivate and unblock expired blocked IPs."""
+    now = datetime.utcnow()
+    expired = db.query(BlockedIP).filter(
+        BlockedIP.is_active == True,
+        BlockedIP.expires_at != None,
+        BlockedIP.expires_at <= now,
+    ).all()
+
+    cleaned = 0
+    failed = 0
+    for ip in expired:
+        try:
+            await mikrotik.unblock_ip(ip.address)
+        except Exception:
+            failed += 1
+        ip.is_active = False
+        cleaned += 1
+
+    db.commit()
+    return {"cleaned": cleaned, "failed_mikrotik": failed, "message": f"Deactivated {cleaned} expired IPs"}

@@ -1,8 +1,10 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from database import engine, Base
+from database import engine, Base, SessionLocal
 from routers import auth, blocklist, threats, dashboard
 from routers import mikrotik_monitor, whitelist, settings
+import mikrotik as mt
 import logging
 import asyncio
 import json
@@ -14,12 +16,43 @@ logger = logging.getLogger(__name__)
 # Create tables
 Base.metadata.create_all(bind=engine)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load default MikroTik device from DB on startup."""
+    try:
+        from models import MikroTikDevice
+        db = SessionLocal()
+        try:
+            default = db.query(MikroTikDevice).filter(
+                MikroTikDevice.is_default == True,
+                MikroTikDevice.is_active == True,
+            ).first()
+            if default:
+                mt.set_default_device({
+                    "host": default.host,
+                    "port": default.port,
+                    "use_ssl": default.use_ssl,
+                    "api_user": default.api_user,
+                    "api_password": default.api_password,
+                })
+                logger.info(f"[Startup] Loaded default MikroTik device: {default.name} ({default.host})")
+            else:
+                logger.warning("[Startup] No default MikroTik device in DB. Add one via Settings tab.")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"[Startup] Failed to load default device: {e}")
+    yield
+
+
 app = FastAPI(
     title="SSTB — Smart Security & Threat Blocker",
     description="Sistem keamanan proaktif MikroTik berbasis threat intelligence",
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
