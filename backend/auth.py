@@ -30,6 +30,35 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+TOTP_SESSION_EXPIRE = timedelta(minutes=5)
+
+
+def create_totp_session_token(username: str) -> str:
+    """Short-lived JWT used as a TOTP challenge token (5 min)."""
+    return create_access_token(
+        {"sub": username, "type": "totp_session"},
+        expires_delta=TOTP_SESSION_EXPIRE,
+    )
+
+
+def verify_totp_session_token(token: str, db: Session) -> User:
+    """Decode TOTP session token and return the User."""
+    err = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired TOTP session")
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if payload.get("type") != "totp_session":
+            raise err
+        username: str = payload.get("sub")
+        if not username:
+            raise err
+    except JWTError:
+        raise err
+    user = db.query(User).filter(User.username == username).first()
+    if user is None or not user.is_active:
+        raise err
+    return user
+
+
 def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),

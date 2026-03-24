@@ -35,6 +35,13 @@ export const register = (email: string, username: string, password: string) =>
   api.post('/auth/register', { email, username, password });
 export const getMe = () => api.get('/auth/me');
 
+// ── TOTP ───────────────────────────────────────────────────────────────────────
+export const totpSetup = () => api.post('/auth/totp/setup');
+export const totpEnable = (code: string) => api.post('/auth/totp/enable', { code });
+export const totpDisable = (code: string) => api.post('/auth/totp/disable', { code });
+export const totpVerifyLogin = (totp_session: string, code: string) =>
+  api.post('/auth/totp/verify-login', { totp_session, code });
+
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 export const getDashboardStats = () => api.get('/dashboard/stats');
 export const getAttackTimeline = (days = 7) => api.get(`/dashboard/attack-timeline?days=${days}`);

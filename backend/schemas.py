@@ -23,6 +23,7 @@ class UserOut(BaseModel):
     username: str
     is_active: bool
     is_admin: bool
+    totp_enabled: bool
     created_at: datetime
 
     class Config:
@@ -33,6 +34,31 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     user: UserOut
+
+
+class LoginOut(BaseModel):
+    """Login response: full token OR TOTP challenge."""
+    # Full token (TOTP not required)
+    access_token: Optional[str] = None
+    token_type: Optional[str] = None
+    user: Optional[UserOut] = None
+    # TOTP challenge
+    requires_totp: bool = False
+    totp_session: Optional[str] = None
+
+
+class TOTPSetupResponse(BaseModel):
+    secret: str
+    provisioning_uri: str
+
+
+class TOTPVerifyRequest(BaseModel):
+    code: str
+
+
+class TOTPLoginRequest(BaseModel):
+    totp_session: str
+    code: str
 
 
 # ── BlockedIP ─────────────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 # SSTB — Smart Security & Threat Blocker
 
-Sistem keamanan proaktif untuk MikroTik RouterOS yang mengintegrasikan threat intelligence eksternal (VirusTotal, AlienVault OTX, ThreatFox, CISA KEV/NVD) dengan geolokasi IP, deteksi otomatis, dan manajemen multi-router dari satu dashboard.
+> Advanced Multi-MikroTik Security Platform
 
-TESTED ON 2026-03-24 | 30/30 TESTS PASSED | ENV: DOCKER COMPOSE (LOCAL) | ROUTER: CCR1009-7G-1C-1S+ ROS 7.22
+Sistem keamanan proaktif untuk MikroTik RouterOS yang mengintegrasikan threat intelligence eksternal (VirusTotal, AlienVault OTX, ThreatFox, CISA KEV/NVD) dengan geolokasi IP, deteksi otomatis, dan manajemen multi-router dari satu dashboard.
 
 ---
 
@@ -158,6 +158,8 @@ docker compose --env-file .env.local up -d
 
 ### 3. Seed Admin
 
+> **Catatan:** Pembuatan akun admin hanya dilakukan via database — tidak ada halaman register di frontend. Gunakan perintah di bawah ini untuk membuat akun pertama.
+
 ```bash
 HASH=$(docker run --rm python:3.11-slim sh -c \
   "pip install passlib bcrypt==4.0.1 -q && python3 -c \
@@ -259,7 +261,6 @@ Di Settings tab, klik **🛡 Setup FW** pada device yang diinginkan. Ini akan me
 ### Auth
 ```
 POST /auth/login          — Login → JWT token
-POST /auth/register       — Daftar user baru
 GET  /auth/me             — Info user aktif
 ```
 

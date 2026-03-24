@@ -283,6 +283,205 @@ const IPScanDetail = ({ result, onBlock, onClose }: {
   );
 };
 
+// ── Profile & 2FA Modal ────────────────────────────────────────────────────────
+const ProfileModal = ({ user, onClose, onUserUpdate }: {
+  user: any; onClose: () => void; onUserUpdate: (u: any) => void;
+}) => {
+  const [totpPhase, setTotpPhase] = useState<'idle' | 'setup' | 'disable'>('idle');
+  const [setupData, setSetupData] = useState<{ secret: string; provisioning_uri: string } | null>(null);
+  const [code, setCode] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [QRCodeSVG, setQRCodeSVG] = useState<any>(null);
+
+  // Lazy-load qrcode.react only in browser
+  useEffect(() => {
+    import('qrcode.react').then((m) => setQRCodeSVG(() => m.QRCodeSVG));
+  }, []);
+
+  const startSetup = async () => {
+    setErr(''); setBusy(true);
+    try {
+      const res = await (await import('@/lib/api')).totpSetup();
+      setSetupData(res.data);
+      setTotpPhase('setup');
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'Gagal memulai setup TOTP');
+    } finally { setBusy(false); }
+  };
+
+  const confirmEnable = async () => {
+    if (code.length !== 6) return;
+    setErr(''); setBusy(true);
+    try {
+      await (await import('@/lib/api')).totpEnable(code);
+      onUserUpdate({ ...user, totp_enabled: true });
+      setTotpPhase('idle'); setCode(''); setSetupData(null);
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'Kode tidak valid');
+    } finally { setBusy(false); }
+  };
+
+  const confirmDisable = async () => {
+    if (code.length !== 6) return;
+    setErr(''); setBusy(true);
+    try {
+      await (await import('@/lib/api')).totpDisable(code);
+      onUserUpdate({ ...user, totp_enabled: false });
+      setTotpPhase('idle'); setCode('');
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'Kode tidak valid');
+    } finally { setBusy(false); }
+  };
+
+  const cancelPhase = () => { setTotpPhase('idle'); setCode(''); setErr(''); setSetupData(null); };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md mx-4 shadow-2xl">
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 border-b border-slate-800">
+          <h2 className="text-base font-semibold text-white flex items-center gap-2">
+            👤 Profile
+          </h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors text-xl leading-none">×</button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {/* User info */}
+          <div className="bg-slate-800/50 rounded-xl p-4 space-y-2">
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Username</span>
+              <span className="text-white font-mono">{user?.username}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Email</span>
+              <span className="text-slate-300">{user?.email}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-400">Role</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${user?.is_admin ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' : 'bg-slate-700 text-slate-400'}`}>
+                {user?.is_admin ? 'Administrator' : 'User'}
+              </span>
+            </div>
+          </div>
+
+          {/* 2FA section */}
+          <div className="bg-slate-800/50 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-sm font-medium text-white flex items-center gap-2">
+                  🔐 Two-Factor Authentication
+                </div>
+                <div className="text-xs text-slate-500 mt-0.5">Google Authenticator compatible</div>
+              </div>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${user?.totp_enabled ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-slate-700 text-slate-400'}`}>
+                {user?.totp_enabled ? 'ACTIVE' : 'OFF'}
+              </span>
+            </div>
+
+            {err && (
+              <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-2 mb-3">
+                {err}
+              </div>
+            )}
+
+            {totpPhase === 'idle' && (
+              <>
+                {!user?.totp_enabled ? (
+                  <button
+                    onClick={startSetup}
+                    disabled={busy}
+                    className="w-full py-2 rounded-lg text-sm font-medium bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 transition-colors disabled:opacity-50"
+                  >
+                    {busy ? 'Loading...' : 'Enable 2FA'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setTotpPhase('disable')}
+                    className="w-full py-2 rounded-lg text-sm font-medium bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 transition-colors"
+                  >
+                    Disable 2FA
+                  </button>
+                )}
+              </>
+            )}
+
+            {totpPhase === 'setup' && setupData && (
+              <div className="space-y-3">
+                <p className="text-xs text-slate-400">Scan QR code ini dengan Google Authenticator:</p>
+                <div className="flex justify-center bg-white p-3 rounded-xl">
+                  {QRCodeSVG
+                    ? <QRCodeSVG value={setupData.provisioning_uri} size={160} />
+                    : <div className="w-40 h-40 flex items-center justify-center text-slate-400 text-xs">Loading QR...</div>
+                  }
+                </div>
+                <div className="text-center">
+                  <p className="text-[10px] text-slate-500 mb-1">Atau masukkan kode manual:</p>
+                  <code className="text-xs font-mono text-cyan-400 bg-slate-900 px-2 py-1 rounded select-all">{setupData.secret}</code>
+                </div>
+                <p className="text-xs text-slate-400">Masukkan kode 6 digit untuk konfirmasi:</p>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-center text-xl font-mono tracking-[0.4em] text-white focus:border-cyan-500/50 outline-none"
+                  placeholder="000000"
+                  autoFocus
+                />
+                <div className="flex gap-2">
+                  <button onClick={cancelPhase} className="flex-1 py-2 rounded-lg text-xs text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors">
+                    Batal
+                  </button>
+                  <button
+                    onClick={confirmEnable}
+                    disabled={busy || code.length !== 6}
+                    className="flex-1 py-2 rounded-lg text-xs font-medium bg-green-500/20 hover:bg-green-500/30 text-green-400 border border-green-500/30 transition-colors disabled:opacity-40"
+                  >
+                    {busy ? 'Verifying...' : 'Aktifkan 2FA'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {totpPhase === 'disable' && (
+              <div className="space-y-3">
+                <p className="text-xs text-slate-400">Masukkan kode dari Google Authenticator untuk menonaktifkan 2FA:</p>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-center text-xl font-mono tracking-[0.4em] text-white focus:border-red-500/50 outline-none"
+                  placeholder="000000"
+                  autoFocus
+                />
+                <div className="flex gap-2">
+                  <button onClick={cancelPhase} className="flex-1 py-2 rounded-lg text-xs text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors">
+                    Batal
+                  </button>
+                  <button
+                    onClick={confirmDisable}
+                    disabled={busy || code.length !== 6}
+                    className="flex-1 py-2 rounded-lg text-xs font-medium bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/20 transition-colors disabled:opacity-40"
+                  >
+                    {busy ? 'Verifying...' : 'Nonaktifkan 2FA'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── Topology SVG Component ─────────────────────────────────────────────────────
 const TopologyDiagram = ({ nodes, onRefresh, refreshing }: {
   nodes: any[]; onRefresh: () => void; refreshing: boolean;
@@ -860,6 +1059,8 @@ export default function DashboardPage() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [liveFeed, setLiveFeed] = useState<any[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
 
   const feedRef = useRef<ReturnType<typeof api.createLiveFeed> | null>(null);
 
@@ -925,6 +1126,7 @@ export default function DashboardPage() {
     const token = Cookies.get('sstb_token');
     if (!token) { router.push('/login'); return; }
     fetchCoreData();
+    api.getMe().then((r) => setCurrentUser(r.data)).catch(() => {});
     const interval = setInterval(fetchCoreData, 30000);
     try {
       feedRef.current = api.createLiveFeed(
@@ -1087,6 +1289,19 @@ export default function DashboardPage() {
           <div className="flex items-center gap-2">
             {stats?.auto_block_enabled && <span className="text-xs bg-green-500/10 border border-green-500/30 text-green-400 px-2 py-1 rounded-full">⚡ Auto-Block ON</span>}
             {summaryCounts?.kev_count > 0 && <span className="text-xs bg-red-500/10 border border-red-500/30 text-red-400 px-2 py-1 rounded-full">🚨 {summaryCounts.kev_count} KEV</span>}
+            <button
+              onClick={() => setShowProfile(true)}
+              title="Profile & 2FA"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+            >
+              <span className="w-6 h-6 rounded-full bg-cyan-500/20 border border-cyan-500/40 text-cyan-400 text-xs flex items-center justify-center font-bold">
+                {currentUser?.username?.[0]?.toUpperCase() ?? '?'}
+              </span>
+              <span className="text-xs text-slate-300">{currentUser?.username ?? '...'}</span>
+              {currentUser?.totp_enabled && (
+                <span className="text-[10px] bg-green-500/20 text-green-400 px-1 rounded border border-green-500/30">2FA</span>
+              )}
+            </button>
           </div>
         </div>
 
@@ -1773,6 +1988,15 @@ export default function DashboardPage() {
         <IPScanDetail result={scanResult}
           onBlock={() => { setBlockAddress(scanResult.ip); setScanResult(null); setBlockModal(true); }}
           onClose={() => setScanResult(null)} />
+      )}
+
+      {/* Profile & 2FA Modal */}
+      {showProfile && currentUser && (
+        <ProfileModal
+          user={currentUser}
+          onClose={() => setShowProfile(false)}
+          onUserUpdate={(u) => setCurrentUser(u)}
+        />
       )}
 
       {/* Block IP Modal */}
